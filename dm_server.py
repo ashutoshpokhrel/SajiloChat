@@ -1,11 +1,10 @@
-
 import socket
 import threading
 import json
 
 IP_address = socket.gethostbyname(socket.gethostname())
 Port = 5050
-BufferSize = 1024
+BufferSize = 4096  # Increased buffer size
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -17,6 +16,7 @@ try:
     print("         SAJILO CHAT SERVER")
     print("=" * 60)
     print(f"Server is listening on {IP_address}:{Port}")
+    print(f"Use 'localhost' or '{IP_address}' to connect")
     print("Waiting for connections...")
     print("=" * 60)
 except OSError as e:
@@ -24,7 +24,6 @@ except OSError as e:
     print("Try closing other instances or wait a minute")
     exit()
 
-# Dictionary to store client connections: {username: socket}
 clients = {}
 clients_lock = threading.Lock()
 
@@ -35,7 +34,8 @@ def broadcast(message_data, exclude_user=None):
         for username, client in clients.items():
             if username != exclude_user:
                 try:
-                    client.send(json.dumps(message_data).encode())
+                    json_msg = json.dumps(message_data) + '\n'
+                    client.send(json_msg.encode('utf-8'))
                 except:
                     pass
 
@@ -45,7 +45,8 @@ def send_to_user(username, message_data):
     with clients_lock:
         if username in clients:
             try:
-                clients[username].send(json.dumps(message_data).encode())
+                json_msg = json.dumps(message_data) + '\n'
+                clients[username].send(json_msg.encode('utf-8'))
                 return True
             except:
                 return False
@@ -61,83 +62,93 @@ def send_user_list():
         'type': 'user_list',
         'users': user_list
     }
+    print(f"[USER_LIST] Broadcasting: {user_list}")
     broadcast(message_data)
 
 
 def handle(client, username):
     """Handle messages from a client"""
+    buffer = ""
+    
     while True:
         try:
-            message = client.recv(BufferSize)
-            if not message:
+            chunk = client.recv(BufferSize)
+            if not chunk:
+                print(f"[INFO] {username} connection closed")
                 break
             
-            # Parse the JSON message
-            message_data = json.loads(message.decode())
-            message_type = message_data.get('type')
+            buffer += chunk.decode('utf-8')
             
-            if message_type == 'group':
-                # Group message - broadcast to everyone
-                broadcast_data = {
-                    'type': 'group',
-                    'from': username,
-                    'message': message_data.get('message')
-                }
-                broadcast(broadcast_data)
-                print(f"[GROUP] {username}: {message_data.get('message')}")
+            # Process complete messages (separated by newlines)
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                if not line.strip():
+                    continue
                 
-            elif message_type == 'dm':
-                # Direct message - send to specific user
-                recipient = message_data.get('to')
-                dm_data = {
-                    'type': 'dm',
-                    'from': username,
-                    'message': message_data.get('message')
-                }
-                
-                # Send to recipient
-                if send_to_user(recipient, dm_data):
-                    # Send confirmation back to sender
-                    confirmation = {
-                        'type': 'dm',
-                        'from': username,
-                        'to': recipient,
-                        'message': message_data.get('message'),
-                        'sent': True
-                    }
-                    client.send(json.dumps(confirmation).encode())
-                    print(f"[DM] {username} -> {recipient}: {message_data.get('message')}")
-                else:
-                    # User not found or offline
-                    error_data = {
-                        'type': 'error',
-                        'message': f'User {recipient} not found or offline'
-                    }
-                    client.send(json.dumps(error_data).encode())
-                    print(f"[ERROR] {username} tried to DM offline user: {recipient}")
+                try:
+                    message_data = json.loads(line)
+                    message_type = message_data.get('type')
                     
-            elif message_type == 'request_users':
-                # Client is requesting the user list
-                send_user_list()
-                
+                    if message_type == 'group':
+                        broadcast_data = {
+                            'type': 'group',
+                            'from': username,
+                            'message': message_data.get('message')
+                        }
+                        broadcast(broadcast_data)
+                        print(f"[GROUP] {username}: {message_data.get('message')}")
+                        
+                    elif message_type == 'dm':
+                        recipient = message_data.get('to')
+                        dm_data = {
+                            'type': 'dm',
+                            'from': username,
+                            'message': message_data.get('message')
+                        }
+                        
+                        if send_to_user(recipient, dm_data):
+                            # Send confirmation back to sender
+                            confirmation = {
+                                'type': 'dm',
+                                'from': username,
+                                'to': recipient,
+                                'message': message_data.get('message'),
+                                'sent': True
+                            }
+                            json_msg = json.dumps(confirmation) + '\n'
+                            client.send(json_msg.encode('utf-8'))
+                            print(f"[DM] {username} -> {recipient}: {message_data.get('message')}")
+                        else:
+                            error_data = {
+                                'type': 'error',
+                                'message': f'User {recipient} not found or offline'
+                            }
+                            json_msg = json.dumps(error_data) + '\n'
+                            client.send(json_msg.encode('utf-8'))
+                            print(f"[ERROR] {username} tried to DM offline user: {recipient}")
+                            
+                    elif message_type == 'request_users':
+                        send_user_list()
+                        
+                except json.JSONDecodeError as e:
+                    print(f"[ERROR] JSON decode error from {username}: {e}")
+                    print(f"[ERROR] Problematic data: {line}")
+                    
         except Exception as e:
-            print(f"[ERROR] Error handling message from {username}: {e}")
+            print(f"[ERROR] Error handling {username}: {e}")
             break
     
-    # Cleanup after loop ends
+    # Cleanup
     with clients_lock:
         if username in clients:
             del clients[username]
             print(f"[DISCONNECT] {username} disconnected")
     
-    # Notify others
     disconnect_data = {
         'type': 'system',
         'message': f'{username} left the chat'
     }
     broadcast(disconnect_data)
-    
-    # Send updated user list
     send_user_list()
     
     try:
@@ -151,58 +162,112 @@ def receive():
     while True:
         try:
             client, address = server_socket.accept()
-            print(f"\n[CONNECTION] New connection from {str(address)}")
+            print(f"\n[CONNECTION] New connection from {address[0]}:{address[1]}")
             
-            # Ask for username
-            client.send(json.dumps({'type': 'request_username'}).encode())
-            username_msg = client.recv(BufferSize).decode()
-            username_data = json.loads(username_msg)
-            username = username_data.get('username')
+            # Send username request
+            json_msg = json.dumps({'type': 'request_username'}) + '\n'
+            client.send(json_msg.encode('utf-8'))
+            print(f"[DEBUG] Sent username request")
             
-            # Check if username is already taken
-            with clients_lock:
-                if username in clients:
-                    error_data = {'type': 'error', 'message': 'Username already taken'}
-                    client.send(json.dumps(error_data).encode())
-                    client.close()
-                    print(f"[REJECTED] Username '{username}' already taken")
+            # Receive username with timeout
+            client.settimeout(10.0)
+            
+            try:
+                data = b''
+                while b'\n' not in data:
+                    chunk = client.recv(1024)
+                    if not chunk:
+                        print(f"[ERROR] Client disconnected during handshake")
+                        client.close()
+                        break
+                    data += chunk
+                
+                if b'\n' not in data:
                     continue
                 
-                clients[username] = client
-            
-            print(f"[LOGIN] Username: {username}")
-            
-            # Send welcome message
-            welcome_data = {
-                'type': 'system',
-                'message': f'Welcome to the server, {username}!'
-            }
-            client.send(json.dumps(welcome_data).encode())
-            
-            # Notify others
-            join_data = {
-                'type': 'system',
-                'message': f'{username} joined the chat'
-            }
-            broadcast(join_data, exclude_user=username)
-            
-            # Send updated user list to everyone
-            send_user_list()
-            
-            # Start handling this client
-            thread = threading.Thread(target=handle, args=(client, username))
-            thread.start()
-            
-        except Exception as e:
-            print(f"[ERROR] Error accepting connection: {e}")
+                message = data.decode('utf-8').strip()
+                print(f"[DEBUG] Received: {message}")
+                
+                username_data = json.loads(message)
+                print(f"[DEBUG] Parsed: {username_data}")
+                
+                if isinstance(username_data, dict):
+                    username = username_data.get('username', '').strip()
+                else:
+                    print(f"[ERROR] Unexpected type: {type(username_data)}")
+                    client.close()
+                    continue
+                
+                if not username:
+                    print(f"[ERROR] Empty username")
+                    client.close()
+                    continue
+                
+                print(f"[DEBUG] Username: '{username}'")
+                
+                # Check if username taken
+                with clients_lock:
+                    if username in clients:
+                        error = json.dumps({
+                            'type': 'error',
+                            'message': 'Username already taken'
+                        }) + '\n'
+                        client.send(error.encode('utf-8'))
+                        client.close()
+                        print(f"[REJECTED] Username '{username}' already taken")
+                        continue
+                    
+                    clients[username] = client
+                
+                client.settimeout(None)
+                
+                print(f"[LOGIN] ✓ {username} logged in")
+                
+                # Send welcome
+                welcome = json.dumps({
+                    'type': 'system',
+                    'message': f'Welcome to the server, {username}!'
+                }) + '\n'
+                client.send(welcome.encode('utf-8'))
+                
+                # Notify others
+                broadcast({
+                    'type': 'system',
+                    'message': f'{username} joined the chat'
+                }, exclude_user=username)
+                
+                # Send user list
+                send_user_list()
+                
+                # Start handler
+                thread = threading.Thread(target=handle, args=(client, username), daemon=True)
+                thread.start()
+                
+            except socket.timeout:
+                print(f"[ERROR] Timeout waiting for username")
+                client.close()
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] JSON error: {e}")
+                client.close()
+            except Exception as e:
+                print(f"[ERROR] Handshake error: {e}")
+                import traceback
+                traceback.print_exc()
+                client.close()
+                
+        except KeyboardInterrupt:
+            print("\n[SHUTDOWN] Server shutting down...")
             break
+        except Exception as e:
+            print(f"[ERROR] Accept error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
-# Start the server
-receive()
-
-
-
-"""
-
-"""
+if __name__ == "__main__":
+    try:
+        receive()
+    except KeyboardInterrupt:
+        print("\n[SHUTDOWN] Server stopped")
+    finally:
+        server_socket.close()
